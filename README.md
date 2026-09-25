@@ -18,9 +18,32 @@ If the network blocks broadcasts, connect directly to the Quest IP address on TC
 
 ## TCP protocol
 
-All integers and floats are **little-endian**. TCP is a byte stream: read the first four bytes to identify a frame, then read the remaining bytes for that frame. Sensor frames and command replies can arrive interleaved. The module sends sensor frames at 200 Hz while it processes commands received on the same connection.
+All integers and floats are **little-endian**. TCP is a byte stream: read the first four bytes to identify a frame, then read the remaining bytes for that frame. Status messages, sensor samples and command replies can arrive interleaved. The module polls sensor fields at 200 Hz and sends a sample when any field changes, plus a heartbeat about every 200 ms while values are unchanged. It sends a status message about once per second. Haptic commands use the same connection.
 
-### Sensor sample: `QPR2` (Quest → client, 32 bytes)
+### Controller status: `QPS1` (Quest → client, variable length)
+
+| Offset | Size | Type | Value |
+| ---: | ---: | --- | --- |
+| 0 | 4 | ASCII | `QPS1` |
+| 4 | 4 | uint32 | Length of the JSON payload in bytes |
+| 8 | Specified above | UTF-8 JSON | Object with `left` and `right` controller entries |
+
+Each controller entry contains:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `connected` | boolean | Controller appears in `trackinginterface_cli ls` |
+| `battery_percent` | integer or null | Battery level, `0..100`; null if unknown |
+| `charging` | boolean or null | Charging state from `dumpsys OVRRemoteService`; null if unknown |
+| `tracked` | boolean | Position is both tracked and valid according to `dumpsys tracking` |
+| `device_id` | string, optional | Controller ID when connected |
+| `controller_type` | string, optional | Model from `trackinginterface_cli ls` |
+| `serial` | string, optional | Serial from `trackinginterface_cli ls`, when present |
+| `tracking_level` | string, optional | Tracking level from `dumpsys tracking`, when available |
+
+A missing controller is represented with `connected: false`, unknown battery and charging, and `tracked: false`.
+
+### Thumb-rest sensor sample: `QPR2` (Quest → client, 32 bytes)
 
 | Offset | Size | Type | Value |
 | ---: | ---: | --- | --- |

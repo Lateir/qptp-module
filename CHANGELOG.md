@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.0
+
+- Send controller connection, battery, charging, tracking and device metadata in a status message about once per second.
+- Send thumb-rest sensor samples when values change, plus a heartbeat about every 200 ms while unchanged.
+- Preserve haptic commands and both USB and LAN transports on the same connection.
+
 ## v2.3
 
 - Accept the existing sensor and haptic protocol over the local network as well as ADB forwarding.

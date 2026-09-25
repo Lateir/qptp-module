@@ -9,7 +9,9 @@
 #include <fcntl.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +51,188 @@ _Static_assert(sizeof(struct reply) == 16, "QPA1 reply size");
 
 struct client_context { int fd; pthread_mutex_t send_lock; };
 static int send_all(int socket_fd, const void *buf, size_t length);
+static uint64_t now_ns(void);
+static void sleep_until(uint64_t ns);
+
+struct controller_status {
+    int connected, battery, charging, tracked;
+    char id[32], model[64], serial[64], level[32];
+};
+struct status_context {
+    struct client_context *client;
+    atomic_bool stop;
+};
+
+static void clean_copy(char *dest, size_t capacity, const char *begin, size_t length) {
+    size_t count = 0;
+    for (size_t i = 0; i < length && count + 1 < capacity; ++i) {
+        unsigned char c = (unsigned char)begin[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' ||
+            c == '(' || c == ')') dest[count++] = (char)c;
+    }
+    dest[count] = 0;
+}
+
+static void copy_field(char *dest, size_t capacity, const char *line,
+                       const char *marker, const char *end_marker) {
+    const char *start = strstr(line, marker);
+    if (!start) return;
+    start += strlen(marker);
+    const char *end = end_marker ? strstr(start, end_marker) : NULL;
+    if (!end) end = start + strcspn(start, " \t\r\n");
+    clean_copy(dest, capacity, start, (size_t)(end - start));
+}
+
+typedef void (*line_handler)(char *, void *);
+static int run_lines(const char *program, const char *arg, line_handler handler, void *context) {
+    int pipes[2];
+    if (pipe(pipes)) return -1;
+    pid_t child = fork();
+    if (child < 0) { close(pipes[0]); close(pipes[1]); return -1; }
+    if (child == 0) {
+        close(pipes[0]);
+        dup2(pipes[1], STDOUT_FILENO);
+        close(pipes[1]);
+        execl(program, program, arg, (char *)NULL);
+        _exit(127);
+    }
+    close(pipes[1]);
+    FILE *out = fdopen(pipes[0], "r");
+    if (!out) { close(pipes[0]); return -1; }
+    char line[2048];
+    while (fgets(line, sizeof(line), out)) handler(line, context);
+    fclose(out);
+    int status;
+    while (waitpid(child, &status, 0) < 0) if (errno != EINTR) return -1;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static void device_line(char *line, void *context) {
+    struct controller_status *items = context;
+    char *start = strstr(line, "[Device ");
+    if (!start) return;
+    int side = strstr(line, "handedness=Left") ? 0 :
+               strstr(line, "handedness=Right") ? 1 : -1;
+    if (side < 0) return;
+    struct controller_status *item = &items[side];
+    start += 8;
+    size_t id_length = strspn(start, "0123456789abcdefABCDEF");
+    if (!id_length || start[id_length] != ' ') return;
+    clean_copy(item->id, sizeof(item->id), start, id_length);
+    copy_field(item->serial, sizeof(item->serial), line, "serial=", " model=");
+    copy_field(item->model, sizeof(item->model), line, "model=", " version=");
+    char *battery = strstr(line, "battery=");
+    if (battery) {
+        int value = atoi(battery + 8);
+        if (value >= 0 && value <= 100) item->battery = value;
+    }
+    item->connected = 1;
+}
+
+struct tracking_context { struct controller_status *items; int section, side, seen; };
+static void tracking_line(char *line, void *context) {
+    struct tracking_context *ctx = context;
+    if (strstr(line, "ControllerTrackerHost Status")) {
+        ctx->section = 1; ctx->side = -1; ctx->seen = 1; return;
+    }
+    if (!ctx->section) return;
+    if (strstr(line, "Tracking capability glue")) { ctx->section = 0; return; }
+    if (strstr(line, "Left --")) ctx->side = 0;
+    else if (strstr(line, "Right --")) ctx->side = 1;
+    char *level = strstr(line, "Tracking Level: ");
+    if (level && ctx->side >= 0 && ctx->items[ctx->side].connected) {
+        struct controller_status *item = &ctx->items[ctx->side];
+        copy_field(item->level, sizeof(item->level), level, "Tracking Level: ", " (");
+        int tracked, valid;
+        char *flags = strstr(level, "(PosTracked=");
+        if (flags && sscanf(flags, "(PosTracked=%d, PosValid=%d", &tracked, &valid) == 2)
+            item->tracked = tracked == 1 && valid == 1;
+    }
+}
+
+struct remote_context { struct controller_status *items; int side; };
+static void remote_line(char *line, void *context) {
+    struct remote_context *ctx = context;
+    char *paired = strstr(line, "Paired device: ");
+    if (paired) {
+        char id[32];
+        paired += strlen("Paired device: ");
+        clean_copy(id, sizeof(id), paired, strspn(paired, "0123456789abcdefABCDEF"));
+        ctx->side = -1;
+        for (int i = 0; i < 2; ++i)
+            if (ctx->items[i].connected && strcmp(ctx->items[i].id, id) == 0) ctx->side = i;
+    }
+    char *charging = strstr(line, "Charging: ");
+    if (charging && ctx->side >= 0) {
+        charging += strlen("Charging: ");
+        if (strncmp(charging, "true", 4) == 0) ctx->items[ctx->side].charging = 1;
+        else if (strncmp(charging, "false", 5) == 0) ctx->items[ctx->side].charging = 0;
+    }
+}
+
+static void append_controller(char *json, size_t capacity, size_t *used,
+                              const char *name, const struct controller_status *item) {
+    char battery[8], charging[8];
+    if (item->battery < 0) strcpy(battery, "null");
+    else snprintf(battery, sizeof(battery), "%d", item->battery);
+    if (item->charging < 0) strcpy(charging, "null");
+    else strcpy(charging, item->charging ? "true" : "false");
+#define APPEND(...) do { if (*used < capacity) { int count = snprintf(json + *used, capacity - *used, __VA_ARGS__); if (count > 0) *used += (size_t)count; } } while (0)
+    APPEND("\"%s\":{\"connected\":%s,\"battery_percent\":%s,\"charging\":%s,\"tracked\":%s",
+           name, item->connected ? "true" : "false", battery, charging,
+           item->tracked ? "true" : "false");
+    if (item->connected) {
+        APPEND(",\"device_id\":\"%s\",\"controller_type\":\"%s\"", item->id, item->model);
+        if (item->serial[0]) APPEND(",\"serial\":\"%s\"", item->serial);
+        if (item->level[0]) APPEND(",\"tracking_level\":\"%s\"", item->level);
+    }
+    APPEND("}");
+#undef APPEND
+}
+
+static int make_status_json(char *json, size_t capacity) {
+    struct controller_status items[2] = {{.battery = -1, .charging = -1},
+                                         {.battery = -1, .charging = -1}};
+    if (run_lines("/system_ext/bin/trackinginterface_cli", "ls", device_line, items)) return -1;
+    struct tracking_context tracking = {.items = items, .side = -1};
+    if (run_lines("/system/bin/dumpsys", "tracking", tracking_line, &tracking) ||
+        !tracking.seen) return -1;
+    struct remote_context remote = {.items = items, .side = -1};
+    if (run_lines("/system/bin/dumpsys", "OVRRemoteService", remote_line, &remote)) return -1;
+    size_t used = 0;
+    int count = snprintf(json, capacity, "{");
+    if (count < 0) return -1;
+    used = (size_t)count;
+    append_controller(json, capacity, &used, "left", &items[0]);
+    if (used < capacity) json[used++] = ',';
+    append_controller(json, capacity, &used, "right", &items[1]);
+    if (used + 2 > capacity) return -1;
+    json[used++] = '}'; json[used] = 0;
+    return (int)used;
+}
+
+static void *status_loop(void *arg) {
+    struct status_context *status = arg;
+    while (!atomic_load(&status->stop)) {
+        uint64_t started = now_ns();
+        char json[1024];
+        int length = make_status_json(json, sizeof(json));
+        if (length > 0) {
+            unsigned char header[8] = {'Q','P','S','1',
+                                       (unsigned char)length, (unsigned char)(length >> 8),
+                                       (unsigned char)(length >> 16), (unsigned char)(length >> 24)};
+            pthread_mutex_lock(&status->client->send_lock);
+            int failed = send_all(status->client->fd, header, sizeof(header)) ||
+                         send_all(status->client->fd, json, (size_t)length);
+            pthread_mutex_unlock(&status->client->send_lock);
+            if (failed) break;
+        }
+        uint64_t next = started + 1000000000ULL;
+        if (next > now_ns()) sleep_until(next);
+    }
+    return NULL;
+}
 
 static void *discovery_loop(void *arg) {
     uint16_t tcp_port = *(uint16_t *)arg;
@@ -252,25 +436,47 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames) {
     struct client_context client = {.fd = socket_fd, .send_lock = PTHREAD_MUTEX_INITIALIZER};
     pthread_t reader;
     if (pthread_create(&reader, NULL, command_loop, &client)) { close(mem_fd); return; }
+    struct status_context status = {.client = &client};
+    atomic_init(&status.stop, false);
+    pthread_t status_thread;
+    if (pthread_create(&status_thread, NULL, status_loop, &status)) {
+        shutdown(socket_fd, SHUT_RD);
+        pthread_join(reader, NULL);
+        pthread_mutex_destroy(&client.send_lock);
+        close(mem_fd);
+        return;
+    }
     const uint64_t period_ns = 1000000000ULL / (unsigned)hz;
     uint64_t next = now_ns();
     struct frame sample = {.magic = {'Q','P','R','2'}};
+    unsigned char previous[16];
+    int have_previous = 0;
+    uint64_t last_sent = 0;
+    unsigned sequence = 0;
     for (unsigned i = 0; !max_frames || i < max_frames; ++i) {
         sleep_until(next);
         sample.monotonic_ns = now_ns();
         if (pread(mem_fd, sample.values, 8, (off_t)left) != 8 ||
             pread(mem_fd, sample.values + 8, 8, (off_t)right) != 8) break;
-        sample.sequence = i;
-        pthread_mutex_lock(&client.send_lock);
-        int sent = send_all(socket_fd, &sample, sizeof(sample));
-        pthread_mutex_unlock(&client.send_lock);
-        if (sent != 0) break;
+        if (!have_previous || memcmp(sample.values, previous, sizeof(previous)) != 0 ||
+            sample.monotonic_ns - last_sent >= 195000000ULL) {
+            sample.sequence = sequence++;
+            pthread_mutex_lock(&client.send_lock);
+            int sent = send_all(socket_fd, &sample, sizeof(sample));
+            pthread_mutex_unlock(&client.send_lock);
+            if (sent != 0) break;
+            memcpy(previous, sample.values, sizeof(previous));
+            have_previous = 1;
+            last_sent = sample.monotonic_ns;
+        }
         next += period_ns;
         uint64_t now = now_ns();
         if (next <= now) next = now + period_ns;
     }
+    atomic_store(&status.stop, true);
     shutdown(socket_fd, SHUT_RD);
     pthread_join(reader, NULL);
+    pthread_join(status_thread, NULL);
     pthread_mutex_destroy(&client.send_lock);
     close(mem_fd);
 }

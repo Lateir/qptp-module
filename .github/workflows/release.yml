@@ -1,0 +1,71 @@
+name: Build and release Magisk module
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qptp-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          python3 scripts/release.py validate "$RELEASE_TAG"
+      - name: Install Zig 0.15.2
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o zig.tar.xz
+          echo '02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  zig.tar.xz' | sha256sum -c -
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - name: Build module ZIP
+        run: |
+          set -euo pipefail
+          zig cc -target aarch64-linux-musl -O2 -static -s src/streamer.c -o bin/qpro_streamer
+          python3 build_module.py
+          file bin/qpro_streamer
+          unzip -t qptp-magisk.zip
+      - name: Save test build
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qptp-magisk-test
+          path: qptp-magisk.zip
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" qptp-magisk.zip --title "$RELEASE_TAG" --notes-file CHANGELOG.md --verify-tag
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fx qptp-magisk.zip
+      - name: Update Magisk manifest
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+          python3 scripts/release.py update "$RELEASE_TAG"
+          git add update.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Update Magisk manifest for $RELEASE_TAG"
+          git push origin main

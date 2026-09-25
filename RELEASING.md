@@ -1,9 +1,8 @@
 # Releasing a module update
 
-1. Increase `versionCode` in `module.prop`; also change its `version` (for example, `v2.2` with code `4`). Keep `id` and `updateJson` unchanged.
-2. Update `CHANGELOG.md`. If `src/streamer.c` changed, rebuild `bin/qpro_streamer` with the Zig command in `README.md`.
-3. Run `python build_module.py`. The existing `update.json` may still advertise the previous release at this point. Inspect the ZIP before publishing.
-4. Commit and push the module changes. Create a release with a matching tag (for example, `v2.2`) and upload **`qpro_touch_stream_magisk.zip`** as its asset. GitHub's automatic source archives are not installable modules.
-5. Verify that the release asset URL downloads the ZIP. Then change `update.json` to the new `version`, `versionCode`, and release `zipUrl`; commit and push it to `main`. Magisk will then see the new release.
+1. Increase `versionCode` in `module.prop` and change `version` to the next tag (for example, `v2.2` and `4`). Keep `id` and `updateJson` unchanged.
+2. Update `CHANGELOG.md`, commit the changes, and push `main`. GitHub Actions rebuilds the binary from `src/streamer.c`.
+3. Optionally run **Build and release Magisk module** from the Actions tab with **Run workflow** on `main`. This produces a downloadable test artifact without publishing a release or changing `update.json`.
+4. Create and push the matching tag from the committed `main` state (for example, `git tag v2.2` and `git push origin v2.2`).
 
-The changelog URL remains `https://raw.githubusercontent.com/Lateir/qptp-module/main/CHANGELOG.md`. GitHub may cache raw files briefly. Never advertise a release in `update.json` before its ZIP is publicly available.
+The tag run builds `qptp-magisk.zip`, publishes it as a GitHub Release asset, then commits the new `update.json` to `main`. The repository must allow GitHub Actions to write contents to `main`. If the manifest push fails, resolve it before creating another release. GitHub may cache raw files briefly.

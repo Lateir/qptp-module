@@ -5,7 +5,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parent
-OUTPUT = ROOT / 'qpro_touch_stream_magisk.zip'
+OUTPUT = ROOT / 'qptp-magisk.zip'
 FILES = ('module.prop', 'service.sh', 'customize.sh', 'bin/qpro_streamer')
 
 

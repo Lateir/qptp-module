@@ -4,7 +4,7 @@ Magisk module for reading the Touch Pro thumb-rest X, Y and force fields from bo
 
 ## Install
 
-Download **`qpro_touch_stream_magisk.zip`** from the [latest release](https://github.com/Lateir/qptp-module/releases/latest), install it through Magisk, and reboot. The GitHub-generated source archives are not installable Magisk modules.
+Download **`qptp-magisk.zip`** from the [latest release](https://github.com/Lateir/qptp-module/releases/latest), install it through Magisk, and reboot. The GitHub-generated source archives are not installable Magisk modules.
 
 This repository contains the module files and update metadata. The ZIP is published as a Release asset. `module.prop` points Magisk to the public [update.json](https://raw.githubusercontent.com/Lateir/qptp-module/main/update.json); each release increments `versionCode` and updates the JSON after its ZIP has been published.
 
@@ -17,4 +17,4 @@ zig cc -target aarch64-linux-musl -O2 -static -s .\src\streamer.c -o .\bin\qpro_
 python .\build_module.py
 ```
 
-`build_module.py` validates the version ordering and creates the installable ZIP. It keeps Magisk scripts as LF text and marks the native executable through `customize.sh`. Follow [RELEASING.md](RELEASING.md) when publishing the next version.
+`build_module.py` validates the version ordering and creates the installable ZIP. It keeps Magisk scripts as LF text and marks the native executable through `customize.sh`. GitHub Actions rebuilds the binary and ZIP for each release tag. Follow [RELEASING.md](RELEASING.md) when publishing the next version.

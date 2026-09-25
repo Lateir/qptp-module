@@ -1,7 +1,7 @@
 id=qpro_touch_stream
 name=Quest Pro Touch Plus
-version=v2.1
-versionCode=3
+version=v2.2
+versionCode=4
 author=Lateir
 description=Unlocks additional features of quest pro controllers.
 updateJson=https://raw.githubusercontent.com/Lateir/qptp-module/main/update.json

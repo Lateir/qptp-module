@@ -21,6 +21,7 @@
 #define LEFT_NAME "/dev/ashmem/TS_CONTROLLER_LEFT (deleted)"
 #define RIGHT_NAME "/dev/ashmem/TS_CONTROLLER_RIGHT (deleted)"
 #define FIELD_OFFSET 0x1f0
+#define DISCOVERY_PORT 27183
 
 struct __attribute__((packed)) frame {
     char magic[4];
@@ -48,6 +49,32 @@ _Static_assert(sizeof(struct reply) == 16, "QPA1 reply size");
 
 struct client_context { int fd; pthread_mutex_t send_lock; };
 static int send_all(int socket_fd, const void *buf, size_t length);
+
+static void *discovery_loop(void *arg) {
+    uint16_t tcp_port = *(uint16_t *)arg;
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return NULL;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr = {.sin_family = AF_INET,
+                               .sin_port = htons(DISCOVERY_PORT),
+                               .sin_addr.s_addr = htonl(INADDR_ANY)};
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr))) { close(fd); return NULL; }
+    for (;;) {
+        unsigned char query[64];
+        struct sockaddr_in peer;
+        socklen_t peer_size = sizeof(peer);
+        ssize_t n = recvfrom(fd, query, sizeof(query), 0, (struct sockaddr *)&peer, &peer_size);
+        if (n == 4 && memcmp(query, "QPD1", 4) == 0) {
+            unsigned char answer[8] = {'Q','P','O','1',
+                                       (unsigned char)tcp_port, (unsigned char)(tcp_port >> 8),
+                                       1, 0};
+            sendto(fd, answer, sizeof(answer), 0, (struct sockaddr *)&peer, peer_size);
+        }
+    }
+    close(fd);
+    return NULL;
+}
 
 static int read_all(int fd, void *buffer, size_t size) {
     unsigned char *p = buffer;
@@ -259,11 +286,15 @@ int main(int argc, char **argv) {
     setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in addr = {.sin_family = AF_INET,
                                .sin_port = htons((uint16_t)port),
-                               .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+                               .sin_addr.s_addr = htonl(INADDR_ANY)};
     if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) || listen(server, 4)) {
         close(server);
         return 4;
     }
+    uint16_t tcp_port = (uint16_t)port;
+    pthread_t discovery;
+    if (pthread_create(&discovery, NULL, discovery_loop, &tcp_port) == 0)
+        pthread_detach(discovery);
     for (;;) {
         int client = accept(server, NULL, NULL);
         if (client < 0) {

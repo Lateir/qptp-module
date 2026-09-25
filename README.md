@@ -1,10 +1,12 @@
 # Quest Pro Touch Plus
 
-Magisk module for reading the Touch Pro thumb-rest X, Y and force fields from both controllers. The device listens only on `127.0.0.1:27182`; a PC connects over USB with `adb forward tcp:27182 tcp:27182`. Each sample is a 32-byte `QPR2` frame containing a sequence number, a monotonic timestamp and `<HHfHHf>` values (left X/Y/force, right X/Y/force). The module reads `trackingservice` memory and does not write to it.
+Magisk module for reading the Touch Pro thumb-rest X, Y and force fields from both controllers. The device listens on TCP port `27182` on all Quest network interfaces. A PC can connect over the local network or over USB with `adb forward tcp:27182 tcp:27182`. Each sample is a 32-byte `QPR2` frame containing a sequence number, a monotonic timestamp and `<HHfHHf>` values (left X/Y/force, right X/Y/force). The module reads `trackingservice` memory and does not write to it.
+
+For LAN discovery, send the four bytes `QPD1` by UDP broadcast to port `27183`. The Quest replies to the sender with eight bytes: `QPO1`, the TCP port as a little-endian uint16, and protocol version `1` as a little-endian uint16. The PC example uses this response to find the headset. UDP broadcast may be blocked by some routers or guest networks; in that case, specify the Quest IP address. The service has no pairing or authentication, so use it on a trusted local network.
 
 The same TCP connection accepts haptic commands and returns acknowledgements while samples continue at 200 Hz. The 16-byte little-endian command is `<4sBBBBHIH>`: `QPC1`, opcode `1`, side (`0` left, `1` right), zone (`0` hand, `1` index, `2` thumb), amplitude (`0..255`), duration in milliseconds (`1..5000`), request ID, reserved `0`. Amplitude `0` with duration `0` stops that zone. The 16-byte response is `<4sIiI>`: `QPA1`, request ID, status, reserved `0`; status `0` means the CLI commands completed, `1` invalid command, `2` controller not found, `3` start failed, `4` stop failed. A pulse response arrives after its stop command. The CLI cannot confirm whether a physical motor actually vibrated.
 
-The PC example in `qpro_debug/qpro_stream_receiver.py` sends a command with `--haptic left thumb 0.2 100` while displaying sensor values. `--haptic right hand 0 0` stops one channel. Applications can send multiple commands on the same socket; responses may arrive among sensor frames, so clients must read each frame by its four-byte magic.
+The PC example in `qpro_debug/qpro_stream_receiver.py` sends a command with `--haptic left thumb 0.2 100` while displaying sensor values. `--haptic right hand 0 0` stops one channel. Use `--transport lan` for automatic discovery, `--transport lan --host QUEST_IP` for a known address, or `--transport usb` (the default) for ADB forwarding. Applications can send multiple commands on the same socket; responses may arrive among sensor frames, so clients must read each frame by its four-byte magic.
 
 ## Install
 

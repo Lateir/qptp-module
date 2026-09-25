@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.3
+
+- Accept the existing sensor and haptic protocol over the local network as well as ADB forwarding.
+- Answer UDP discovery queries on port 27183 with the TCP service port.
+
 ## v2.2
 
 - Add bidirectional commands and acknowledgements to the existing TCP stream.

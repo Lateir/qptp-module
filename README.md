@@ -17,4 +17,4 @@ zig cc -target aarch64-linux-musl -O2 -static -s .\src\streamer.c -o .\bin\qpro_
 python .\build_module.py
 ```
 
-`build_module.py` validates that the manifest version matches `module.prop` and creates the installable ZIP. It keeps Magisk scripts as LF text and marks the native executable through `customize.sh`.
+`build_module.py` validates the version ordering and creates the installable ZIP. It keeps Magisk scripts as LF text and marks the native executable through `customize.sh`. Follow [RELEASING.md](RELEASING.md) when publishing the next version.

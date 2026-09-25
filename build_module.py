@@ -22,8 +22,12 @@ def properties(path):
 
 prop = properties(ROOT / 'module.prop')
 manifest = json.loads((ROOT / 'update.json').read_text(encoding='utf-8'))
-if prop['version'] != manifest['version'] or int(prop['versionCode']) != manifest['versionCode']:
-    raise SystemExit('module.prop and update.json versions differ')
+module_code = int(prop['versionCode'])
+published_code = int(manifest['versionCode'])
+if published_code > module_code:
+    raise SystemExit('update.json advertises a newer version than module.prop')
+if published_code == module_code and prop['version'] != manifest['version']:
+    raise SystemExit('module.prop and update.json names differ at the same versionCode')
 if prop.get('updateJson') != 'https://raw.githubusercontent.com/Lateir/qptp-module/main/update.json':
     raise SystemExit('module.prop updateJson does not match this repository')
 if not (ROOT / 'bin/qpro_streamer').read_bytes().startswith(b'\x7fELF'):
@@ -40,3 +44,5 @@ with ZipFile(OUTPUT, 'w', ZIP_DEFLATED) as archive:
         info.external_attr = ((0o755 if name.endswith(('.sh', 'qpro_streamer')) else 0o644) << 16)
         archive.writestr(info, data)
 print(OUTPUT)
+if published_code < module_code:
+    print('Staged next version: publish the ZIP before updating update.json')

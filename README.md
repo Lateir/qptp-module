@@ -109,3 +109,7 @@ python .\build_module.py
 ```
 
 `build_module.py` validates the version ordering and creates the installable ZIP. It keeps Magisk scripts as LF text and marks the native executable through `customize.sh`. GitHub Actions rebuilds the binary and ZIP for each release tag. Follow [RELEASING.md](RELEASING.md) when publishing the next version.
+
+## License
+
+This project's original code is available under [0BSD](LICENSE).

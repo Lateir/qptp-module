@@ -20,7 +20,7 @@ If the network blocks broadcasts, connect directly to the Quest IP address on TC
 
 All integers and floats are **little-endian**. TCP is a byte stream: read the first four bytes to identify a frame, then read the remaining bytes for that frame. Sensor samples and command replies can arrive interleaved. The module polls sensor fields at 200 Hz and sends a sample when any field changes, plus a heartbeat about every 200 ms while values are unchanged. Haptic commands use the same connection.
 
-Controller status messages are disabled by default in v3.1. The earlier one-second status query repeatedly ran a full `dumpsys tracking` while streaming; disabling it avoids that work. Clients should treat connection, battery, charging and tracking status as unavailable unless the legacy status mode is explicitly enabled. To enable it for diagnostics, start `qpro_streamer` with `27182 200 0 1` (port, sample rate, unlimited frames, status enabled). This mode restores the periodic system-service queries.
+The module sends controller status once every five seconds. It reads connection and battery from Meta's `trackinginterface_cli ls`, and tracking flags from `trackinginterface_cli getcontrollertrackingdata 0`, without a full `dumpsys tracking`. Charging still comes from `dumpsys OVRRemoteService`. When starting the binary manually, pass `27182 200 0 1` (port, sample rate, unlimited frames, status enabled); omitting the fifth argument disables status messages.
 
 ### Optional controller status: `QPS1` (Quest → client, variable length)
 
@@ -37,11 +37,11 @@ Each controller entry contains:
 | `connected` | boolean | Controller appears in `trackinginterface_cli ls` |
 | `battery_percent` | integer or null | Battery level, `0..100`; null if unknown |
 | `charging` | boolean or null | Charging state from `dumpsys OVRRemoteService`; null if unknown |
-| `tracked` | boolean | Position is both tracked and valid according to `dumpsys tracking` |
+| `tracked` | boolean | Position is both tracked and valid according to Meta's controller tracking API |
 | `device_id` | string, optional | Controller ID when connected |
 | `controller_type` | string, optional | Model from `trackinginterface_cli ls` |
 | `serial` | string, optional | Serial from `trackinginterface_cli ls`, when present |
-| `tracking_level` | string, optional | Tracking level from `dumpsys tracking`, when available |
+| `tracking_level` | string, optional | `6DOF`, `3DOF`, or `Invalid`, derived from the API's position and orientation flags |
 
 A missing controller is represented with `connected: false`, unknown battery and charging, and `tracked: false`.
 

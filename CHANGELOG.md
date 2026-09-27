@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2
+
+- Restore controller status every five seconds through Meta's tracking interface instead of repeatedly running `dumpsys tracking`.
+- Report connection and battery from the device list, and position tracking from controller tracking flags. Charging remains sourced from `OVRRemoteService`.
+- Keep the 200 Hz thumb-rest stream and haptic commands unchanged.
+
 ## v3.1
 
 - Stop periodic controller-status queries by default to avoid repeatedly dumping `trackingservice` while streaming.

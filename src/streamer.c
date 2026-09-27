@@ -24,6 +24,7 @@
 #define RIGHT_NAME "/dev/ashmem/TS_CONTROLLER_RIGHT (deleted)"
 #define FIELD_OFFSET 0x1f0
 #define DISCOVERY_PORT 27183
+#define STATUS_INTERVAL_NS 5000000000ULL
 
 struct __attribute__((packed)) frame {
     char magic[4];
@@ -85,7 +86,8 @@ static void copy_field(char *dest, size_t capacity, const char *line,
 }
 
 typedef void (*line_handler)(char *, void *);
-static int run_lines(const char *program, const char *arg, line_handler handler, void *context) {
+static int run_lines2(const char *program, const char *arg, const char *arg2,
+                      line_handler handler, void *context) {
     int pipes[2];
     if (pipe(pipes)) return -1;
     pid_t child = fork();
@@ -94,7 +96,7 @@ static int run_lines(const char *program, const char *arg, line_handler handler,
         close(pipes[0]);
         dup2(pipes[1], STDOUT_FILENO);
         close(pipes[1]);
-        execl(program, program, arg, (char *)NULL);
+        execl(program, program, arg, arg2, (char *)NULL);
         _exit(127);
     }
     close(pipes[1]);
@@ -106,6 +108,10 @@ static int run_lines(const char *program, const char *arg, line_handler handler,
     int status;
     while (waitpid(child, &status, 0) < 0) if (errno != EINTR) return -1;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int run_lines(const char *program, const char *arg, line_handler handler, void *context) {
+    return run_lines2(program, arg, NULL, handler, context);
 }
 
 static void device_line(char *line, void *context) {
@@ -130,24 +136,35 @@ static void device_line(char *line, void *context) {
     item->connected = 1;
 }
 
-struct tracking_context { struct controller_status *items; int section, side, seen; };
+struct tracking_context { struct controller_status *items; int side, seen; };
 static void tracking_line(char *line, void *context) {
     struct tracking_context *ctx = context;
-    if (strstr(line, "ControllerTrackerHost Status")) {
-        ctx->section = 1; ctx->side = -1; ctx->seen = 1; return;
+    char *header = strstr(line, "Controller #");
+    if (header) {
+        char id[32];
+        header += strlen("Controller #");
+        size_t length = strspn(header, "0123456789abcdefABCDEF");
+        ctx->side = -1;
+        if (!length || header[length] != ':') return;
+        clean_copy(id, sizeof(id), header, length);
+        for (int i = 0; i < 2; ++i)
+            if (ctx->items[i].connected && strcmp(ctx->items[i].id, id) == 0) ctx->side = i;
+        return;
     }
-    if (!ctx->section) return;
-    if (strstr(line, "Tracking capability glue")) { ctx->section = 0; return; }
-    if (strstr(line, "Left --")) ctx->side = 0;
-    else if (strstr(line, "Right --")) ctx->side = 1;
-    char *level = strstr(line, "Tracking Level: ");
-    if (level && ctx->side >= 0 && ctx->items[ctx->side].connected) {
-        struct controller_status *item = &ctx->items[ctx->side];
-        copy_field(item->level, sizeof(item->level), level, "Tracking Level: ", " (");
-        int tracked, valid;
-        char *flags = strstr(level, "(PosTracked=");
-        if (flags && sscanf(flags, "(PosTracked=%d, PosValid=%d", &tracked, &valid) == 2)
-            item->tracked = tracked == 1 && valid == 1;
+    if (ctx->side >= 0 && strstr(line, "Valid:") && strstr(line, "PosTracked:")) {
+        int valid;
+        char ori_tracked[8], ori_valid[8], pos_tracked[8], pos_valid[8];
+        if (sscanf(line, " Valid: %d OriTracked: %7s OriValid: %7s PosTracked: %7s PosValid: %7s",
+                   &valid, ori_tracked, ori_valid, pos_tracked, pos_valid) == 5) {
+            struct controller_status *item = &ctx->items[ctx->side];
+            item->tracked = valid == 1 && strcmp(pos_tracked, "Yes") == 0 &&
+                            strcmp(pos_valid, "Yes") == 0;
+            if (item->tracked) strcpy(item->level, "6DOF");
+            else if (valid == 1 && strcmp(ori_tracked, "Yes") == 0 &&
+                     strcmp(ori_valid, "Yes") == 0) strcpy(item->level, "3DOF");
+            else strcpy(item->level, "Invalid");
+            ctx->seen++;
+        }
     }
 }
 
@@ -196,8 +213,9 @@ static int make_status_json(char *json, size_t capacity) {
                                          {.battery = -1, .charging = -1}};
     if (run_lines("/system_ext/bin/trackinginterface_cli", "ls", device_line, items)) return -1;
     struct tracking_context tracking = {.items = items, .side = -1};
-    if (run_lines("/system/bin/dumpsys", "tracking", tracking_line, &tracking) ||
-        !tracking.seen) return -1;
+    if (run_lines2("/system_ext/bin/trackinginterface_cli", "getcontrollertrackingdata", "0",
+                   tracking_line, &tracking) ||
+        ((items[0].connected || items[1].connected) && !tracking.seen)) return -1;
     struct remote_context remote = {.items = items, .side = -1};
     if (run_lines("/system/bin/dumpsys", "OVRRemoteService", remote_line, &remote)) return -1;
     size_t used = 0;
@@ -228,7 +246,7 @@ static void *status_loop(void *arg) {
             pthread_mutex_unlock(&status->client->send_lock);
             if (failed) break;
         }
-        uint64_t next = started + 1000000000ULL;
+        uint64_t next = started + STATUS_INTERVAL_NS;
         if (next > now_ns()) sleep_until(next);
     }
     return NULL;

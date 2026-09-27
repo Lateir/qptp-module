@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.1
+
+- Stop periodic controller-status queries by default to avoid repeatedly dumping `trackingservice` while streaming.
+- Keep the 200 Hz thumb-rest stream and haptic commands active. Controller connection, battery, charging and tracking status are unavailable in the default stream.
+- Allow the legacy status messages when starting `qpro_streamer` with a fifth argument of `1`.
+
 ## v3.0
 
 - Send controller connection, battery, charging, tracking and device metadata in a status message about once per second.

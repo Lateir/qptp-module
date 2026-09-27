@@ -18,9 +18,11 @@ If the network blocks broadcasts, connect directly to the Quest IP address on TC
 
 ## TCP protocol
 
-All integers and floats are **little-endian**. TCP is a byte stream: read the first four bytes to identify a frame, then read the remaining bytes for that frame. Status messages, sensor samples and command replies can arrive interleaved. The module polls sensor fields at 200 Hz and sends a sample when any field changes, plus a heartbeat about every 200 ms while values are unchanged. It sends a status message about once per second. Haptic commands use the same connection.
+All integers and floats are **little-endian**. TCP is a byte stream: read the first four bytes to identify a frame, then read the remaining bytes for that frame. Sensor samples and command replies can arrive interleaved. The module polls sensor fields at 200 Hz and sends a sample when any field changes, plus a heartbeat about every 200 ms while values are unchanged. Haptic commands use the same connection.
 
-### Controller status: `QPS1` (Quest → client, variable length)
+Controller status messages are disabled by default in v3.1. The earlier one-second status query repeatedly ran a full `dumpsys tracking` while streaming; disabling it avoids that work. Clients should treat connection, battery, charging and tracking status as unavailable unless the legacy status mode is explicitly enabled. To enable it for diagnostics, start `qpro_streamer` with `27182 200 0 1` (port, sample rate, unlimited frames, status enabled). This mode restores the periodic system-service queries.
+
+### Optional controller status: `QPS1` (Quest → client, variable length)
 
 | Offset | Size | Type | Value |
 | ---: | ---: | --- | --- |

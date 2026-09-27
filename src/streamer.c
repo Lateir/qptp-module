@@ -423,7 +423,7 @@ static int send_all(int socket_fd, const void *buf, size_t length) {
     return 0;
 }
 
-static void serve_client(int socket_fd, int hz, unsigned max_frames) {
+static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_enabled) {
     int pid = find_pid();
     uint64_t left, right;
     if (pid < 0 || find_addresses(pid, &left, &right) != 0) return;
@@ -439,12 +439,14 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames) {
     struct status_context status = {.client = &client};
     atomic_init(&status.stop, false);
     pthread_t status_thread;
-    if (pthread_create(&status_thread, NULL, status_loop, &status)) {
-        shutdown(socket_fd, SHUT_RD);
-        pthread_join(reader, NULL);
-        pthread_mutex_destroy(&client.send_lock);
-        close(mem_fd);
-        return;
+    if (status_enabled) {
+        if (pthread_create(&status_thread, NULL, status_loop, &status)) {
+            shutdown(socket_fd, SHUT_RD);
+            pthread_join(reader, NULL);
+            pthread_mutex_destroy(&client.send_lock);
+            close(mem_fd);
+            return;
+        }
     }
     const uint64_t period_ns = 1000000000ULL / (unsigned)hz;
     uint64_t next = now_ns();
@@ -476,7 +478,7 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames) {
     atomic_store(&status.stop, true);
     shutdown(socket_fd, SHUT_RD);
     pthread_join(reader, NULL);
-    pthread_join(status_thread, NULL);
+    if (status_enabled) pthread_join(status_thread, NULL);
     pthread_mutex_destroy(&client.send_lock);
     close(mem_fd);
 }
@@ -485,7 +487,9 @@ int main(int argc, char **argv) {
     int port = argc > 1 ? atoi(argv[1]) : 27182;
     int hz = argc > 2 ? atoi(argv[2]) : 100;
     unsigned max_frames = argc > 3 ? (unsigned)strtoul(argv[3], NULL, 10) : 0;
-    if (port < 1024 || port > 65535 || hz < 1 || hz > 500) return 2;
+    int status_enabled = argc > 4 ? atoi(argv[4]) : 0;
+    if (port < 1024 || port > 65535 || hz < 1 || hz > 500 ||
+        status_enabled < 0 || status_enabled > 1) return 2;
     int server = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (server < 0) return 3;
     int one = 1;
@@ -507,7 +511,7 @@ int main(int argc, char **argv) {
             if (errno == EINTR) continue;
             break;
         }
-        serve_client(client, hz, max_frames);
+        serve_client(client, hz, max_frames, status_enabled);
         close(client);
     }
     close(server);

@@ -1,6 +1,6 @@
 {
-  "version": "v3.3",
-  "versionCode": 9,
-  "zipUrl": "https://github.com/Lateir/qptp-module/releases/download/v3.3/qptp-magisk.zip",
+  "version": "v3.4",
+  "versionCode": 10,
+  "zipUrl": "https://github.com/Lateir/qptp-module/releases/download/v3.4/qptp-magisk.zip",
   "changelog": "https://raw.githubusercontent.com/Lateir/qptp-module/main/CHANGELOG.md"
 }

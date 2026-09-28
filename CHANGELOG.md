@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.3
+
+- Stream the rear stylus, trigger finger proximity, and trigger slide values for both Touch Pro controllers in QPR3 frames.
+- Send the installed module version and versionCode immediately after each TCP connection.
+- Wait for a client before opening or sampling trackingservice memory.
+
 ## v3.2
 
 - Restore controller status every five seconds through Meta's tracking interface instead of repeatedly running `dumpsys tracking`.

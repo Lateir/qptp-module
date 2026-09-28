@@ -29,6 +29,7 @@
 #define MODULE_PROP "/data/adb/modules/qpro_touch_stream/module.prop"
 #define DISCOVERY_PORT 27183
 #define STATUS_INTERVAL_NS 5000000000ULL
+#define STYLUS_SETTLE_NS 50000000ULL
 
 struct __attribute__((packed)) frame {
     char magic[4];
@@ -466,6 +467,30 @@ static int send_version(int fd) {
     return send_all(fd, header, sizeof(header)) || send_all(fd, json, (size_t)length) ? -1 : 0;
 }
 
+struct stylus_state {
+    uint32_t raw_bits;
+    uint64_t changed_ns;
+    bool initialized;
+};
+
+static void settle_stylus(unsigned char *value, struct stylus_state *state, uint64_t now) {
+    uint32_t bits;
+    memcpy(&bits, value, sizeof(bits));
+    if (!state->initialized || bits != state->raw_bits) {
+        state->raw_bits = bits;
+        state->changed_ns = now;
+        state->initialized = true;
+        return;
+    }
+    if (now - state->changed_ns < STYLUS_SETTLE_NS) return;
+    float raw;
+    memcpy(&raw, &bits, sizeof(raw));
+    if (raw > 0.0f && raw < 1.0f) {
+        float settled = raw >= 0.5f ? 1.0f : 0.0f;
+        memcpy(value, &settled, sizeof(settled));
+    }
+}
+
 static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_enabled) {
     if (send_version(socket_fd)) return;
     int pid = find_pid();
@@ -496,6 +521,7 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_
     uint64_t next = now_ns();
     struct frame sample = {.magic = {'Q','P','R','3'}};
     unsigned char previous[40];
+    struct stylus_state stylus[2] = {0};
     int have_previous = 0;
     uint64_t last_sent = 0;
     unsigned sequence = 0;
@@ -514,6 +540,8 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_
             }
         }
         if (failed) break;
+        for (int side = 0; side < 2; ++side)
+            settle_stylus(sample.values + side * 20 + 8, &stylus[side], sample.monotonic_ns);
         if (!have_previous || memcmp(sample.values, previous, sizeof(previous)) != 0 ||
             sample.monotonic_ns - last_sent >= 195000000ULL) {
             sample.sequence = sequence++;

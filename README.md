@@ -61,6 +61,8 @@ Sent immediately after each TCP connection. An 8-byte header contains `QPV1` and
 
 Each controller block contains little-endian `u16` X and Y, followed by `f32` thumb-rest force, rear stylus sensor, trigger finger proximity, and lateral trigger slide. The last three values come from shared-memory offsets `0x110`, `0x218`, and `0x240`. Their scale and polarity are not yet characterized.
 
+Each rear stylus value is sent unchanged while it is moving. If its raw value stays at the same intermediate level for 50 ms, the streamer sends 0 below 0.5 or 1 at and above 0.5 until the raw value changes again. The two controllers are tracked independently.
+
 The module waits for a TCP client before opening or sampling trackingservice memory. LAN discovery still responds while waiting.
 
 ### Haptic command: `QPC1` (client → Quest, 16 bytes)

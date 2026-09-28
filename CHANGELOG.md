@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.4
+
+- Settle each rear stylus sensor to 0 or 1 after its raw value stays unchanged for 50 ms, using 0.5 as the midpoint. Resume raw values immediately when the sensor changes.
+
 ## v3.3
 
 - Stream the rear stylus, trigger finger proximity, and trigger slide values for both Touch Pro controllers in QPR3 frames.

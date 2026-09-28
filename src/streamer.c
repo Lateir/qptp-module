@@ -1,5 +1,5 @@
 /* Quest Pro Touch sampler and haptics bridge.
- * Wire format: 32-byte QPR2 samples, 16-byte QPC1 commands/QPA1 replies.
+ * Wire format: QPV1 version, 56-byte QPR3 samples, QPC1 commands/QPA1 replies.
  * Linux/aarch64 target; root is required to read trackingservice memory.
  */
 #define _GNU_SOURCE
@@ -23,6 +23,10 @@
 #define LEFT_NAME "/dev/ashmem/TS_CONTROLLER_LEFT (deleted)"
 #define RIGHT_NAME "/dev/ashmem/TS_CONTROLLER_RIGHT (deleted)"
 #define FIELD_OFFSET 0x1f0
+#define STYLUS_OFFSET 0x110
+#define PROXIMITY_OFFSET 0x218
+#define SLIDE_OFFSET 0x240
+#define MODULE_PROP "/data/adb/modules/qpro_touch_stream/module.prop"
 #define DISCOVERY_PORT 27183
 #define STATUS_INTERVAL_NS 5000000000ULL
 
@@ -30,9 +34,9 @@ struct __attribute__((packed)) frame {
     char magic[4];
     uint32_t sequence;
     uint64_t monotonic_ns;
-    unsigned char values[16];
+    unsigned char values[40];
 };
-_Static_assert(sizeof(struct frame) == 32, "QPR2 frame must be 32 bytes");
+_Static_assert(sizeof(struct frame) == 56, "QPR3 frame must be 56 bytes");
 
 struct __attribute__((packed)) command {
     char magic[4];
@@ -411,7 +415,7 @@ static int find_addresses(int pid, uint64_t *left, uint64_t *right) {
         mapped[0] = 0;
         int fields = sscanf(line, "%llx-%llx %7s %llx %31s %llu %511[^\n]",
                             &start, &end, perms, &offset, dev, &inode, mapped);
-        if (fields != 7 || perms[0] != 'r' || end - start < FIELD_OFFSET + 8) continue;
+        if (fields != 7 || perms[0] != 'r' || end - start < SLIDE_OFFSET + 4) continue;
         if (strcmp(mapped, LEFT_NAME) == 0) *left = (uint64_t)start + FIELD_OFFSET;
         if (strcmp(mapped, RIGHT_NAME) == 0) *right = (uint64_t)start + FIELD_OFFSET;
     }
@@ -441,7 +445,29 @@ static int send_all(int socket_fd, const void *buf, size_t length) {
     return 0;
 }
 
+static int send_version(int fd) {
+    FILE *file = fopen(MODULE_PROP, "r");
+    if (!file) return -1;
+    char line[128], version[64] = "";
+    unsigned code = 0;
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "version=", 8) == 0)
+            clean_copy(version, sizeof(version), line + 8, strcspn(line + 8, "\r\n"));
+        else if (strncmp(line, "versionCode=", 12) == 0)
+            code = (unsigned)strtoul(line + 12, NULL, 10);
+    }
+    fclose(file);
+    if (!version[0] || !code) return -1;
+    char json[128];
+    int length = snprintf(json, sizeof(json), "{\"version\":\"%s\",\"versionCode\":%u}", version, code);
+    if (length <= 0 || (size_t)length >= sizeof(json)) return -1;
+    unsigned char header[8] = {'Q','P','V','1', (unsigned char)length,
+                               (unsigned char)(length >> 8), 0, 0};
+    return send_all(fd, header, sizeof(header)) || send_all(fd, json, (size_t)length) ? -1 : 0;
+}
+
 static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_enabled) {
+    if (send_version(socket_fd)) return;
     int pid = find_pid();
     uint64_t left, right;
     if (pid < 0 || find_addresses(pid, &left, &right) != 0) return;
@@ -468,16 +494,26 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_
     }
     const uint64_t period_ns = 1000000000ULL / (unsigned)hz;
     uint64_t next = now_ns();
-    struct frame sample = {.magic = {'Q','P','R','2'}};
-    unsigned char previous[16];
+    struct frame sample = {.magic = {'Q','P','R','3'}};
+    unsigned char previous[40];
     int have_previous = 0;
     uint64_t last_sent = 0;
     unsigned sequence = 0;
     for (unsigned i = 0; !max_frames || i < max_frames; ++i) {
         sleep_until(next);
         sample.monotonic_ns = now_ns();
-        if (pread(mem_fd, sample.values, 8, (off_t)left) != 8 ||
-            pread(mem_fd, sample.values + 8, 8, (off_t)right) != 8) break;
+        uint64_t bases[2] = {left - FIELD_OFFSET, right - FIELD_OFFSET};
+        int failed = 0;
+        for (int side = 0; side < 2; ++side) {
+            unsigned char *values = sample.values + side * 20;
+            if (pread(mem_fd, values, 8, (off_t)(bases[side] + FIELD_OFFSET)) != 8 ||
+                pread(mem_fd, values + 8, 4, (off_t)(bases[side] + STYLUS_OFFSET)) != 4 ||
+                pread(mem_fd, values + 12, 4, (off_t)(bases[side] + PROXIMITY_OFFSET)) != 4 ||
+                pread(mem_fd, values + 16, 4, (off_t)(bases[side] + SLIDE_OFFSET)) != 4) {
+                failed = 1; break;
+            }
+        }
+        if (failed) break;
         if (!have_previous || memcmp(sample.values, previous, sizeof(previous)) != 0 ||
             sample.monotonic_ns - last_sent >= 195000000ULL) {
             sample.sequence = sequence++;

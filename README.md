@@ -45,19 +45,23 @@ Each controller entry contains:
 
 A missing controller is represented with `connected: false`, unknown battery and charging, and `tracked: false`.
 
-### Thumb-rest sensor sample: `QPR2` (Quest → client, 32 bytes)
+### Module version: `QPV1` (Quest to client, variable length)
+
+Sent immediately after each TCP connection. An 8-byte header contains `QPV1` and a little-endian uint32 JSON length, followed by UTF-8 JSON with `version` and `versionCode` from the installed `module.prop`.
+
+### Controller sensor sample: `QPR3` (Quest to client, 56 bytes)
 
 | Offset | Size | Type | Value |
 | ---: | ---: | --- | --- |
-| 0 | 4 | ASCII | `QPR2` |
-| 4 | 4 | uint32 | Sample sequence number, starting at 0 for each connection |
-| 8 | 8 | uint64 | Device monotonic timestamp, nanoseconds |
-| 16 | 2 | uint16 | Left thumb-rest X |
-| 18 | 2 | uint16 | Left thumb-rest Y |
-| 20 | 4 | float32 | Left thumb-rest force |
-| 24 | 2 | uint16 | Right thumb-rest X |
-| 26 | 2 | uint16 | Right thumb-rest Y |
-| 28 | 4 | float32 | Right thumb-rest force |
+| 0 | 4 | ASCII | `QPR3` |
+| 4 | 4 | uint32 | Sample sequence number |
+| 8 | 8 | uint64 | Monotonic timestamp in nanoseconds |
+| 16 | 20 | mixed | Left controller values |
+| 36 | 20 | mixed | Right controller values |
+
+Each controller block contains little-endian `u16` X and Y, followed by `f32` thumb-rest force, rear stylus sensor, trigger finger proximity, and lateral trigger slide. The last three values come from shared-memory offsets `0x110`, `0x218`, and `0x240`. Their scale and polarity are not yet characterized.
+
+The module waits for a TCP client before opening or sampling trackingservice memory. LAN discovery still responds while waiting.
 
 ### Haptic command: `QPC1` (client → Quest, 16 bytes)
 

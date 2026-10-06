@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.5
+
+- Bound TCP sends to two seconds and unacknowledged data to five seconds so lost Wi-Fi connections release the client session.
+- Shut down both socket directions on disconnect and wake the status loop promptly during cleanup.
+- Add network recovery tests for a stalled send, blocked reader shutdown, and subsequent connections.
+
 ## v3.4
 
 - Settle each rear stylus sensor to 0 or 1 after its raw value stays unchanged for 50 ms, using 0.5 as the midpoint. Resume raw values immediately when the sensor changes.

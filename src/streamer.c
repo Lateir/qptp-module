@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -249,10 +250,13 @@ static void *status_loop(void *arg) {
             int failed = send_all(status->client->fd, header, sizeof(header)) ||
                          send_all(status->client->fd, json, (size_t)length);
             pthread_mutex_unlock(&status->client->send_lock);
-            if (failed) break;
+            if (failed) { shutdown(status->client->fd, SHUT_RDWR); break; }
         }
         uint64_t next = started + STATUS_INTERVAL_NS;
-        if (next > now_ns()) sleep_until(next);
+        while (!atomic_load(&status->stop) && next > now_ns()) {
+            uint64_t tick = now_ns() + 100000000ULL;
+            sleep_until(tick < next ? tick : next);
+        }
     }
     return NULL;
 }
@@ -375,7 +379,7 @@ static void *command_loop(void *arg) {
         pthread_mutex_unlock(&client->send_lock);
         if (result) break;
     }
-    shutdown(client->fd, SHUT_RD);
+    shutdown(client->fd, SHUT_RDWR);
     return NULL;
 }
 
@@ -437,8 +441,21 @@ static void sleep_until(uint64_t ns) {
 
 static int send_all(int socket_fd, const void *buf, size_t length) {
     const unsigned char *bytes = buf;
+    uint64_t deadline = now_ns() + 2000000000ULL;
     while (length) {
-        ssize_t n = send(socket_fd, bytes, length, MSG_NOSIGNAL);
+        uint64_t now = now_ns();
+        if (now >= deadline) { errno = ETIMEDOUT; return -1; }
+        ssize_t n = send(socket_fd, bytes, length, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd writable = {.fd = socket_fd, .events = POLLOUT};
+            int ms = (int)((deadline - now + 999999ULL) / 1000000ULL);
+            int ready = poll(&writable, 1, ms);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready == 0) { errno = ETIMEDOUT; return -1; }
+            if (ready < 0 || (writable.revents & (POLLERR | POLLHUP | POLLNVAL))) return -1;
+            continue;
+        }
         if (n <= 0) return -1;
         bytes += n;
         length -= (size_t)n;
@@ -558,7 +575,7 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_
         if (next <= now) next = now + period_ns;
     }
     atomic_store(&status.stop, true);
-    shutdown(socket_fd, SHUT_RD);
+    shutdown(socket_fd, SHUT_RDWR);
     pthread_join(reader, NULL);
     if (status_enabled) pthread_join(status_thread, NULL);
     pthread_mutex_destroy(&client.send_lock);
@@ -593,7 +610,16 @@ int main(int argc, char **argv) {
             if (errno == EINTR) continue;
             break;
         }
+        // Bound unacknowledged data even while send() still fits in the kernel buffer.
+        unsigned timeout_ms = 5000;
+        if (setsockopt(client, IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout_ms, sizeof(timeout_ms))) {
+            perror("qptp: TCP_USER_TIMEOUT");
+            close(client);
+            continue;
+        }
+        fprintf(stderr, "qptp: client connected\n");
         serve_client(client, hz, max_frames, status_enabled);
+        fprintf(stderr, "qptp: client session ended; waiting for connection\n");
         close(client);
     }
     close(server);

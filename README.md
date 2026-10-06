@@ -4,7 +4,7 @@ Magisk module for reading the Touch Pro thumb-rest X, Y and force fields from bo
 
 ## Connection and discovery
 
-The module listens on TCP port **27182** on all Quest network interfaces. Connect directly over a local network, or use USB with `adb forward tcp:27182 tcp:27182`. Both transports use the same bidirectional TCP protocol. The service has no pairing or authentication; use it on a trusted local network.
+The module listens on TCP port **27182** on all Quest network interfaces. Connect directly over a local network, or use USB with `adb forward tcp:27182 tcp:27182`. Both transports use the same bidirectional TCP protocol. Sends have a two-second deadline, and TCP unacknowledged data has a five-second timeout. A failed session shuts down both socket directions and returns to accepting connections; no application protocol change is required. The service has no pairing or authentication; use it on a trusted local network.
 
 For automatic discovery, broadcast the four ASCII bytes `QPD1` to UDP port **27183**. The Quest sends an eight-byte response to the sender:
 

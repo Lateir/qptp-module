@@ -59,7 +59,46 @@ Sent immediately after each TCP connection. An 8-byte header contains `QPV1` and
 | 16 | 20 | mixed | Left controller values |
 | 36 | 20 | mixed | Right controller values |
 
-Each controller block contains little-endian `u16` X and Y, followed by `f32` thumb-rest force, rear stylus sensor, trigger finger proximity, and lateral trigger slide. The last three values come from shared-memory offsets `0x110`, `0x218`, and `0x240`. Their scale and polarity are not yet characterized.
+Each controller block contains little-endian `u16` X and Y, followed by `f32` thumb-rest force, rear stylus sensor, trigger finger proximity, and lateral trigger slide. Their scale and polarity are not yet characterized.
+
+QPR3 is the default format on every new connection. A client can switch to QPR4 with `QPC1` opcode `2`.
+
+### Extended controller sample: `QPR4` (Quest to client, 72 bytes, opt-in)
+
+| Offset | Size | Type | Value |
+| ---: | ---: | --- | --- |
+| 0 | 4 | ASCII | `QPR4` |
+| 4 | 4 | uint32 | Sample sequence number |
+| 8 | 8 | uint64 | Monotonic timestamp in nanoseconds |
+| 16 | 28 | mixed | Left controller values |
+| 44 | 28 | mixed | Right controller values |
+
+Each 28-byte controller block:
+
+| Offset | Size | Type | Value |
+| ---: | ---: | --- | --- |
+| 0 | 2 | uint16 | Thumb-rest X |
+| 2 | 2 | uint16 | Thumb-rest Y |
+| 4 | 4 | float32 | Thumb-rest force |
+| 8 | 4 | float32 | Thumb-rest contact size (area) |
+| 12 | 4 | float32 | Rear stylus sensor |
+| 16 | 4 | float32 | Trigger finger proximity (curl) |
+| 20 | 4 | float32 | Trigger slide (position) |
+| 24 | 1 | uint8 | Thumb-rest state; bit 0 = touching, other bits are passed through unchanged |
+| 25 | 3 | — | Zero |
+
+A change in any field, including size and state, sends a sample.
+
+### Sensor source
+
+Thumb-rest and trigger values are double-buffered in each `TS_CONTROLLER_*` shared-memory page. The module reads a `u32` counter, then the record selected by `counter & 1`, then the counter again, and retries up to four times if the counter changed. If every attempt races the writer, that record keeps its previous values for the sample.
+
+| Record | Counter | Record address | Fields |
+| --- | ---: | --- | --- |
+| Thumb rest | `0x1e8` | `0x1f0 + 16 * (counter & 1)` | X `u16`, Y `u16`, force `f32`, size `f32`, state `u8` at +12 |
+| Trigger | `0x210` | `0x218 + 0x24 * (counter & 1)` | proximity (curl) `f32` at +0, slide (position) `f32` at +4 |
+
+The rear stylus sensor is read directly from `0x110`.
 
 Each rear stylus value is sent unchanged while it is moving. If its raw value stays at the same intermediate level for 50 ms, the streamer sends 0 below 0.5 or 1 at and above 0.5 until the raw value changes again. The two controllers are tracked independently.
 
@@ -80,6 +119,23 @@ The module waits for a TCP client before opening or sampling trackingservice mem
 
 Amplitude `0` with duration `0` stops the selected channel. A nonzero amplitude requires a duration of 1–5000 ms. Commands on one connection are processed in order.
 
+### Frame format command: `QPC1` opcode `2` (client → Quest, 16 bytes)
+
+Available from module `versionCode` 12.
+
+| Offset | Size | Type | Value |
+| ---: | ---: | --- | --- |
+| 0 | 4 | ASCII | `QPC1` |
+| 4 | 1 | uint8 | Opcode: `2` = set sample frame format |
+| 5 | 1 | uint8 | Format: `3` = QPR3, `4` = QPR4 |
+| 6 | 1 | uint8 | Must be `0` |
+| 7 | 1 | uint8 | Must be `0` |
+| 8 | 2 | uint16 | Must be `0` |
+| 10 | 4 | uint32 | Request ID, echoed in the reply |
+| 14 | 2 | uint16 | Reserved, must be `0` |
+
+The module replies with `QPA1` status `0`, or `1` for an invalid command, which leaves the format unchanged. Every sample sent after a status `0` reply uses the new format; samples before it use the old one. The format returns to QPR3 on each new connection. Older modules reply `1` to opcode `2` and keep the connection open.
+
 ### Haptic reply: `QPA1` (Quest → client, 16 bytes)
 
 | Offset | Size | Type | Value |
@@ -91,7 +147,7 @@ Amplitude `0` with duration `0` stops the selected channel. A nonzero amplitude 
 
 | Status | Meaning |
 | ---: | --- |
-| 0 | Haptic CLI commands completed |
+| 0 | Haptic CLI commands completed, or frame format changed |
 | 1 | Invalid command |
 | 2 | Controller not found |
 | 3 | Start command failed |

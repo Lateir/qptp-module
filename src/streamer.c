@@ -1,5 +1,5 @@
 /* Quest Pro Touch sampler and haptics bridge.
- * Wire format: QPV1 version, 56-byte QPR3 samples, QPC1 commands/QPA1 replies.
+ * Wire format: QPV1 version, 56-byte QPR3 or 72-byte QPR4 samples, QPC1 commands/QPA1 replies.
  * Linux/aarch64 target; root is required to read trackingservice memory.
  */
 #define _GNU_SOURCE
@@ -23,22 +23,29 @@
 
 #define LEFT_NAME "/dev/ashmem/TS_CONTROLLER_LEFT (deleted)"
 #define RIGHT_NAME "/dev/ashmem/TS_CONTROLLER_RIGHT (deleted)"
-#define FIELD_OFFSET 0x1f0
+/* Touch and trigger records are double-buffered: a u32 counter selects record counter&1. */
+#define TOUCH_SEQ_OFFSET 0x1e8
+#define TOUCH_RECORD_OFFSET 0x1f0
+#define TOUCH_RECORD_BYTES 16
+#define TRIGGER_SEQ_OFFSET 0x210
+#define TRIGGER_RECORD_OFFSET 0x218
+#define TRIGGER_RECORD_BYTES 0x24
 #define STYLUS_OFFSET 0x110
-#define PROXIMITY_OFFSET 0x218
-#define SLIDE_OFFSET 0x240
+#define SEQLOCK_TRIES 4
 #define MODULE_PROP "/data/adb/modules/qpro_touch_stream/module.prop"
 #define DISCOVERY_PORT 27183
 #define STATUS_INTERVAL_NS 5000000000ULL
 #define STYLUS_SETTLE_NS 50000000ULL
 
-struct __attribute__((packed)) frame {
-    char magic[4];
-    uint32_t sequence;
-    uint64_t monotonic_ns;
-    unsigned char values[40];
+struct __attribute__((packed)) side_sample {
+    uint16_t x, y;
+    float force, size, stylus, proximity, slide;
+    uint8_t state, padding[3];
 };
-_Static_assert(sizeof(struct frame) == 56, "QPR3 frame must be 56 bytes");
+_Static_assert(sizeof(struct side_sample) == 28, "QPR4 side block must be 28 bytes");
+#define FRAME_HEADER_BYTES 16
+#define QPR3_BYTES 56
+#define QPR4_BYTES 72
 
 struct __attribute__((packed)) command {
     char magic[4];
@@ -56,7 +63,7 @@ struct __attribute__((packed)) reply {
 _Static_assert(sizeof(struct command) == 16, "QPC1 command size");
 _Static_assert(sizeof(struct reply) == 16, "QPA1 reply size");
 
-struct client_context { int fd; pthread_mutex_t send_lock; };
+struct client_context { int fd; pthread_mutex_t send_lock; atomic_int frame_format; };
 static int send_all(int socket_fd, const void *buf, size_t length);
 static uint64_t now_ns(void);
 static void sleep_until(uint64_t ns);
@@ -368,13 +375,23 @@ static int haptic(const struct command *cmd) {
     return 0;
 }
 
+// Opcode 2 reuses the side byte as the frame format: 3 = QPR3, 4 = QPR4.
+static int frame_format_valid(const struct command *cmd) {
+    return cmd->opcode == 2 && (cmd->side == 3 || cmd->side == 4) && !cmd->zone &&
+           !cmd->amplitude && !cmd->duration_ms && !cmd->reserved;
+}
+
 static void *command_loop(void *arg) {
     struct client_context *client = arg;
     struct command cmd;
     while (!read_all(client->fd, &cmd, sizeof(cmd))) {
         struct reply answer = {.magic = {'Q','P','A','1'}, .request_id = cmd.request_id};
-        answer.status = memcmp(cmd.magic, "QPC1", 4) ? 1 : haptic(&cmd);
+        int format = memcmp(cmd.magic, "QPC1", 4) == 0 && cmd.opcode == 2;
+        if (format) answer.status = frame_format_valid(&cmd) ? 0 : 1;
+        else answer.status = memcmp(cmd.magic, "QPC1", 4) ? 1 : haptic(&cmd);
         pthread_mutex_lock(&client->send_lock);
+        // Switch under the send lock so every sample after this reply uses the new format.
+        if (format && !answer.status) atomic_store(&client->frame_format, cmd.side);
         int result = send_all(client->fd, &answer, sizeof(answer));
         pthread_mutex_unlock(&client->send_lock);
         if (result) break;
@@ -420,9 +437,10 @@ static int find_addresses(int pid, uint64_t *left, uint64_t *right) {
         mapped[0] = 0;
         int fields = sscanf(line, "%llx-%llx %7s %llx %31s %llu %511[^\n]",
                             &start, &end, perms, &offset, dev, &inode, mapped);
-        if (fields != 7 || perms[0] != 'r' || end - start < SLIDE_OFFSET + 4) continue;
-        if (strcmp(mapped, LEFT_NAME) == 0) *left = (uint64_t)start + FIELD_OFFSET;
-        if (strcmp(mapped, RIGHT_NAME) == 0) *right = (uint64_t)start + FIELD_OFFSET;
+        if (fields != 7 || perms[0] != 'r' ||
+            end - start < TRIGGER_RECORD_OFFSET + 2 * TRIGGER_RECORD_BYTES) continue;
+        if (strcmp(mapped, LEFT_NAME) == 0) *left = (uint64_t)start;
+        if (strcmp(mapped, RIGHT_NAME) == 0) *right = (uint64_t)start;
     }
     fclose(file);
     return (*left && *right) ? 0 : -1;
@@ -508,6 +526,52 @@ static void settle_stylus(unsigned char *value, struct stylus_state *state, uint
     }
 }
 
+// Returns 0 with a consistent record, 1 if the writer kept racing, -1 on read failure.
+static int read_record(int mem_fd, uint64_t base, size_t seq_offset, size_t record_offset,
+                       size_t bytes, unsigned char *record) {
+    for (int tries = 0; tries < SEQLOCK_TRIES; ++tries) {
+        uint32_t before, after;
+        if (pread(mem_fd, &before, 4, (off_t)(base + seq_offset)) != 4 ||
+            pread(mem_fd, record, bytes, (off_t)(base + record_offset + bytes * (before & 1))) != (ssize_t)bytes ||
+            pread(mem_fd, &after, 4, (off_t)(base + seq_offset)) != 4) return -1;
+        if (before == after) return 0;
+    }
+    return 1;
+}
+
+// A torn record keeps that record's previous values.
+static int read_side(int mem_fd, uint64_t base, struct side_sample *side) {
+    unsigned char touch[TOUCH_RECORD_BYTES], trigger[TRIGGER_RECORD_BYTES];
+    int result = read_record(mem_fd, base, TOUCH_SEQ_OFFSET, TOUCH_RECORD_OFFSET, sizeof(touch), touch);
+    if (result < 0) return -1;
+    if (!result) {
+        memcpy(&side->x, touch, 2); memcpy(&side->y, touch + 2, 2);
+        memcpy(&side->force, touch + 4, 4); memcpy(&side->size, touch + 8, 4);
+        side->state = touch[12];
+    }
+    result = read_record(mem_fd, base, TRIGGER_SEQ_OFFSET, TRIGGER_RECORD_OFFSET, sizeof(trigger), trigger);
+    if (result < 0) return -1;
+    if (!result) { memcpy(&side->proximity, trigger, 4); memcpy(&side->slide, trigger + 4, 4); }
+    return pread(mem_fd, &side->stylus, 4, (off_t)(base + STYLUS_OFFSET)) == 4 ? 0 : -1;
+}
+
+static size_t build_frame(unsigned char *out, int format, uint32_t sequence, uint64_t ns,
+                          const struct side_sample sides[2]) {
+    memcpy(out, format == 4 ? "QPR4" : "QPR3", 4);
+    memcpy(out + 4, &sequence, 4); memcpy(out + 8, &ns, 8);
+    if (format == 4) {
+        memcpy(out + FRAME_HEADER_BYTES, sides, 2 * sizeof(*sides));
+        return QPR4_BYTES;
+    }
+    for (int i = 0; i < 2; ++i) {
+        unsigned char *values = out + FRAME_HEADER_BYTES + i * 20;
+        memcpy(values, &sides[i].x, 2); memcpy(values + 2, &sides[i].y, 2);
+        memcpy(values + 4, &sides[i].force, 4); memcpy(values + 8, &sides[i].stylus, 4);
+        memcpy(values + 12, &sides[i].proximity, 4); memcpy(values + 16, &sides[i].slide, 4);
+    }
+    return QPR3_BYTES;
+}
+
 static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_enabled) {
     if (send_version(socket_fd)) return;
     int pid = find_pid();
@@ -520,6 +584,7 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_
     int one = 1;
     setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     struct client_context client = {.fd = socket_fd, .send_lock = PTHREAD_MUTEX_INITIALIZER};
+    atomic_init(&client.frame_format, 3);
     pthread_t reader;
     if (pthread_create(&reader, NULL, command_loop, &client)) { close(mem_fd); return; }
     struct status_context status = {.client = &client};
@@ -536,39 +601,35 @@ static void serve_client(int socket_fd, int hz, unsigned max_frames, int status_
     }
     const uint64_t period_ns = 1000000000ULL / (unsigned)hz;
     uint64_t next = now_ns();
-    struct frame sample = {.magic = {'Q','P','R','3'}};
-    unsigned char previous[40];
+    struct side_sample sides[2] = {0};
+    unsigned char frame[QPR4_BYTES], previous[QPR4_BYTES];
     struct stylus_state stylus[2] = {0};
-    int have_previous = 0;
+    size_t previous_size = 0;
     uint64_t last_sent = 0;
     unsigned sequence = 0;
     for (unsigned i = 0; !max_frames || i < max_frames; ++i) {
         sleep_until(next);
-        sample.monotonic_ns = now_ns();
-        uint64_t bases[2] = {left - FIELD_OFFSET, right - FIELD_OFFSET};
-        int failed = 0;
-        for (int side = 0; side < 2; ++side) {
-            unsigned char *values = sample.values + side * 20;
-            if (pread(mem_fd, values, 8, (off_t)(bases[side] + FIELD_OFFSET)) != 8 ||
-                pread(mem_fd, values + 8, 4, (off_t)(bases[side] + STYLUS_OFFSET)) != 4 ||
-                pread(mem_fd, values + 12, 4, (off_t)(bases[side] + PROXIMITY_OFFSET)) != 4 ||
-                pread(mem_fd, values + 16, 4, (off_t)(bases[side] + SLIDE_OFFSET)) != 4) {
-                failed = 1; break;
-            }
-        }
-        if (failed) break;
+        uint64_t sampled_ns = now_ns();
+        if (read_side(mem_fd, left, &sides[0]) || read_side(mem_fd, right, &sides[1])) break;
         for (int side = 0; side < 2; ++side)
-            settle_stylus(sample.values + side * 20 + 8, &stylus[side], sample.monotonic_ns);
-        if (!have_previous || memcmp(sample.values, previous, sizeof(previous)) != 0 ||
-            sample.monotonic_ns - last_sent >= 195000000ULL) {
-            sample.sequence = sequence++;
+            settle_stylus((unsigned char *)&sides[side].stylus, &stylus[side], sampled_ns);
+        int format = atomic_load(&client.frame_format);
+        size_t size = build_frame(frame, format, sequence, sampled_ns, sides);
+        // A format switch changes the size, which forces an immediate send.
+        if (size != previous_size ||
+            memcmp(frame + FRAME_HEADER_BYTES, previous + FRAME_HEADER_BYTES, size - FRAME_HEADER_BYTES) ||
+            sampled_ns - last_sent >= 195000000ULL) {
             pthread_mutex_lock(&client.send_lock);
-            int sent = send_all(socket_fd, &sample, sizeof(sample));
+            int stale = atomic_load(&client.frame_format) != format;
+            int sent = stale ? 0 : send_all(socket_fd, frame, size);
             pthread_mutex_unlock(&client.send_lock);
             if (sent != 0) break;
-            memcpy(previous, sample.values, sizeof(previous));
-            have_previous = 1;
-            last_sent = sample.monotonic_ns;
+            if (!stale) {
+                ++sequence;
+                memcpy(previous, frame, size);
+                previous_size = size;
+                last_sent = sampled_ns;
+            }
         }
         next += period_ns;
         uint64_t now = now_ns();

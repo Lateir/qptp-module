@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.6
+
+- Read thumb-rest and trigger values consistently from their double buffers.
+- Add opt-in QPR4 samples with thumb-rest contact size and touch state, enabled by QPC1 opcode 2.
+- Run test assertions in optimized builds.
+
 ## v3.5
 
 - Bound TCP sends to two seconds and unacknowledged data to five seconds so lost Wi-Fi connections release the client session.
